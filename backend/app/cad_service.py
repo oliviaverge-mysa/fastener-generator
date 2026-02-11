@@ -5,6 +5,8 @@ import tempfile
 from dataclasses import dataclass
 import cadquery as cq
 from cadquery import exporters
+from .pdf_service import generate_drawing_pdf
+
 
 from cq_warehouse.fastener import (
     HexNut,
@@ -73,6 +75,10 @@ def generate_step_and_stl_zip(req: GenerateRequest) -> bytes:
             step_bytes = f.read()
         with open(stl_path, "rb") as f:
             stl_bytes = f.read()
+        pdf_bytes = generate_drawing_pdf(req)
+        zf.writestr("drawing.pdf", pdf_bytes)
+
+
 
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:

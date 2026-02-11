@@ -4,5 +4,6 @@ cadquery==2.5.2
 git+https://github.com/gumyr/cq_warehouse.git
 openai==2.20.0
 python-dotenv==1.0.1
+reportlab==4.2.5
 
 
