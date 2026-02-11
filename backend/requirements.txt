@@ -1,4 +1,8 @@
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
 cadquery==2.5.2
-cq-warehouse==0.8.0
+git+https://github.com/gumyr/cq_warehouse.git
+openai==2.20.0
+python-dotenv==1.0.1
+
+

@@ -1,8 +1,9 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
+from fastapi import Body
 from pydantic import BaseModel, Field
-
+from .chat_service import parse_chat_message
 from .cad_service import GenerateRequest, generate_step_and_stl_zip, FAMILIES
 from cq_warehouse.fastener import HexNut, Screw, Nut  # used for discovery
 
@@ -23,6 +24,12 @@ class GenerateBody(BaseModel):
     size: str = Field(..., description="Size string, e.g. M6-1 or #6-32")
     length_mm: float | None = Field(None, description="Required for screws")
     simple: bool = Field(True, description="If true, do not model helical threads (faster)")
+
+@app.post("/api/chat")
+def chat(payload: dict = Body(...)):
+    if "text" not in payload:
+        raise HTTPException(status_code=400, detail="Missing 'text'")
+    return parse_chat_message(payload["text"])
 
 @app.get("/api/catalog")
 def catalog():
