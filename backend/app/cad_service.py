@@ -3,11 +3,13 @@ import os
 import zipfile
 import tempfile
 from dataclasses import dataclass
+from .mcmaster_catalog import McMasterCatalog
+
+
 import cadquery as cq
 from cadquery import exporters
+
 from .pdf_service import generate_drawing_pdf
-
-
 from cq_warehouse.fastener import (
     HexNut,
     SocketHeadCapScrew,
@@ -17,6 +19,7 @@ from cq_warehouse.fastener import (
 )
 
 MM = 1.0
+
 
 @dataclass(frozen=True)
 class GenerateRequest:
@@ -36,7 +39,17 @@ FAMILIES = {
     "PanHeadScrew": PanHeadScrew,
 }
 
-def _build_solid(req: GenerateRequest) -> cq.Solid:
+# ---- McMaster catalog (loaded once) ----
+CATALOG_PATH = os.getenv("MCMASTER_CSV_PATH", "backend/data/mcmaster_fasteners.csv")
+_MCM = McMasterCatalog(CATALOG_PATH)
+
+
+
+def _build_shape(req: GenerateRequest):
+    """
+    Returns a CADQuery shape/object that exporters can write.
+    cq_warehouse fasteners are usually CQ shapes/parts that exporters can handle directly.
+    """
     if req.family not in FAMILIES:
         raise ValueError(f"Unsupported family: {req.family}")
 
@@ -59,30 +72,116 @@ def _build_solid(req: GenerateRequest) -> cq.Solid:
     raise ValueError("part must be 'screw' or 'nut'")
 
 
-def generate_step_and_stl_zip(req: GenerateRequest) -> bytes:
-    solid = _build_solid(req)
+def _export_step_stl_bytes(req: GenerateRequest) -> tuple[bytes, bytes]:
+    """
+    Export STEP + STL to bytes using temp files (most reliable with cadquery exporters).
+    """
+    shape = _build_shape(req)
 
-    # STEP export often requires a real file path (not BytesIO),
-    # so we export to a temporary directory.
-    with tempfile.TemporaryDirectory() as tmpdir:
-        step_path = os.path.join(tmpdir, "part.step")
-        stl_path = os.path.join(tmpdir, "part.stl")
+    with tempfile.TemporaryDirectory() as td:
+        step_path = os.path.join(td, "model.step")
+        stl_path = os.path.join(td, "model.stl")
 
-        exporters.export(solid, step_path, exporters.ExportTypes.STEP)
-        exporters.export(solid, stl_path, exporters.ExportTypes.STL)
+        # Exporters expect a CQ object/shape; cq_warehouse fasteners typically work here.
+        exporters.export(shape, step_path)
+        exporters.export(shape, stl_path)
 
         with open(step_path, "rb") as f:
             step_bytes = f.read()
         with open(stl_path, "rb") as f:
             stl_bytes = f.read()
-        pdf_bytes = generate_drawing_pdf(req)
-        zf.writestr("drawing.pdf", pdf_bytes)
+
+    return step_bytes, stl_bytes
+
+
+def generate_step_and_stl_zip(req: GenerateRequest) -> bytes:
+    """
+    Returns a ZIP containing:
+    - model.step
+    - model.stl
+    - drawing.pdf (true views) OR spec_sheet.pdf fallback
+    """
+    # Build shape once (used for drawing)
+    shape = _build_shape(req)
+
+    # Export CAD
+    step_bytes, stl_bytes = _export_step_stl_bytes(req)
+
+    # PDFs: prefer true drawing, fall back to spec sheet
+    from .pdf_service import generate_drawing_pdf, generate_spec_sheet_pdf
+
+    vendor = None
+    item_dict = {
+        "part": req.part,
+        "family": req.family,
+        "fastener_type": req.fastener_type,
+        "size": req.size,
+        "length_mm": req.length_mm,
+    }
+    m = _MCM.resolve_item(item_dict)
+    if m:
+        vendor = {
+            "vendor": "mcmaster",
+            "mcmaster_pn": m.mcmaster_pn,
+            "mcmaster_url": m.url,
+            "vendor_description": m.description,
+            "pack_qty": m.pack_qty,
+        }
+
+    try:
+        pdf_bytes = generate_drawing_pdf(req, shape, vendor=vendor)
+        pdf_name = "drawing.pdf"
+    except Exception:
+        pdf_bytes = generate_spec_sheet_pdf(req, vendor=vendor)
+        pdf_name = "spec_sheet.pdf"
+
+
+    # Package into zip
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("model.step", step_bytes)
+        zf.writestr("model.stl", stl_bytes)
+        zf.writestr(pdf_name, pdf_bytes)
+
+    return buf.getvalue()
 
 
 
-    zip_buf = io.BytesIO()
-    with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("part.step", step_bytes)
-        zf.writestr("part.stl", stl_bytes)
+# cad_service.py (add near your other helpers)
 
-    return zip_buf.getvalue()
+def _as_cq_shape(obj):
+    """
+    Try hard to get a CadQuery Shape from cq_warehouse objects.
+    """
+    # Many CQ objects support .val()
+    if hasattr(obj, "val"):
+        try:
+            return obj.val()
+        except Exception:
+            pass
+
+    # Some have .solid()
+    if hasattr(obj, "solid"):
+        try:
+            return obj.solid().val() if hasattr(obj.solid(), "val") else obj.solid()
+        except Exception:
+            pass
+
+    # Might already be a Shape
+    return obj
+
+
+def _bbox_mm(shape) -> dict:
+    s = _as_cq_shape(shape)
+    bb = s.BoundingBox()
+    return {
+        "x_mm": float(bb.xlen),
+        "y_mm": float(bb.ylen),
+        "z_mm": float(bb.zlen),
+        "xmin": float(bb.xmin),
+        "xmax": float(bb.xmax),
+        "ymin": float(bb.ymin),
+        "ymax": float(bb.ymax),
+        "zmin": float(bb.zmin),
+        "zmax": float(bb.zmax),
+    }
